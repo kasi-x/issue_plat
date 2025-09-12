@@ -1,0 +1,46 @@
+# Node / pnpm
+node_modules/
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# TypeScript
+*.tsbuildinfo
+.eslintcache
+
+# Build outputs
+dist/
+build/
+out/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Environment files (keep examples)
+.env
+.env.*
+!.env.example
+!.env.*.example
+.dev.vars
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Cloudflare Wrangler
+.wrangler/
+
+# Turborepo (if used)
+.turbo/
+
+# Rust (leptos-app)
+leptos-app/target/
+leptos-app/dist/

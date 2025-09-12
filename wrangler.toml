@@ -1,0 +1,16 @@
+name = "leptos-blog-annotations"
+compatibility_date = "2024-06-01"
+
+# Pages Functions: Wrangler will look inside ./functions for route handlers.
+pages_build_output_dir = "./public"
+
+[vars]
+# ORIGIN_HOST = "example.com"
+# TURNSTILE_SITE_KEY = ""
+
+[[d1_databases]]
+binding = "DB"
+database_name = "leptos_blog"
+database_id = "__REPLACE_WITH_D1_ID__"
+
+# If you use Cloudflare Rate Limiting rules, configure them in the dashboard.

@@ -1,0 +1,6 @@
+dist = "../public/assets"
+public_url = "/assets/"
+
+[build]
+release = false
+

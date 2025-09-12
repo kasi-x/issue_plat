@@ -1,0 +1,162 @@
+version: '3'
+
+vars:
+  PORT: 8788
+  DB_NAME: leptos_blog
+
+env:
+  PORT: "{{.PORT}}"
+
+tasks:
+  # -----------------------------
+  # Leptos front-end dev (Trunk)
+  # -----------------------------
+  dev:
+    desc: Run Leptos (Trunk) dev server with live reload
+    dir: leptos-app
+    cmds:
+      - |
+        set -euo pipefail
+        # Ensure wasm target exists (no-op if already installed)
+        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
+          rustup target add wasm32-unknown-unknown
+        fi
+        # Prefer existing trunk; optionally install if missing
+        if ! command -v trunk >/dev/null 2>&1; then
+          echo "trunk not found; installing via cargo install trunk" >&2
+          cargo install trunk
+        fi
+        exec trunk serve --open
+  # -----------------------------
+  # Setup & Utilities
+  # -----------------------------
+  setup:
+    desc: Install Node dev deps (pnpm) and prepare workspace
+    cmds:
+      - pnpm install
+
+  wasm:build:
+    desc: Build Leptos (WASM) bundle into public/assets
+    dir: leptos-app
+    cmds:
+      - |
+        if command -v trunk >/dev/null 2>&1; then \
+          trunk build --dist ../public/assets; \
+          js=$(ls ../public/assets/*.js 2>/dev/null | head -n1); \
+          wasm=$(ls ../public/assets/*.wasm 2>/dev/null | head -n1); \
+          if [ -n "$js" ]; then cp "$js" ../public/assets/app.js; fi; \
+          if [ -n "$wasm" ]; then cp "$wasm" ../public/assets/app_bg.wasm; fi; \
+        else \
+          if command -v wasm-pack >/dev/null 2>&1; then \
+            wasm-pack build --target web --out-dir ../public/assets --out-name app; \
+          else \
+            pnpm dlx wasm-pack build --target web --out-dir ../public/assets --out-name app; \
+          fi; \
+        fi
+
+  wasm:watch:
+    desc: Watch Leptos with Trunk and emit to public/assets
+    dir: leptos-app
+    cmds:
+      - |
+        set -euo pipefail
+        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
+          rustup target add wasm32-unknown-unknown
+        fi
+        if ! command -v trunk >/dev/null 2>&1; then
+          echo "trunk not found; installing via cargo install trunk" >&2
+          cargo install trunk
+        fi
+        exec trunk watch --dist ../public/assets
+
+  db:local:init:
+    desc: Apply local D1 schema and seed (requires wrangler)
+    cmds:
+      - pnpm dlx wrangler d1 execute {{.DB_NAME}} --local --file=./migrations/0001_init.sql
+      - pnpm dlx wrangler d1 execute {{.DB_NAME}} --local --file=./migrations/0002_seed_dev.sql
+
+  # -----------------------------
+  # Option 1: Run everything inside container
+  # -----------------------------
+  dev:container:
+    desc: Build and run via Docker Compose (container runs Trunk + server on :{{.PORT}})
+    cmds:
+      - |
+        set -euo pipefail
+        run() { echo "+ $*"; eval "$*"; }
+        pick_compose() {
+          if docker compose version >/dev/null 2>&1; then echo "docker compose"; return; fi
+          if command -v docker-compose >/dev/null 2>&1; then echo "docker-compose"; return; fi
+          echo "docker compose";
+        }
+        DC="$(pick_compose)"
+        if $DC version >/dev/null 2>&1; then
+          run "$DC build --no-cache"
+          run "$DC up"
+        else
+          if command -v sudo >/dev/null 2>&1; then
+            run "sudo $DC build --no-cache"
+            run "sudo $DC up"
+          else
+            echo "Docker requires root; either run: sudo task dev:container, or add your user to the docker group (see README)." >&2
+            exit 1
+          fi
+        fi
+
+  # -----------------------------
+  # Option 2: Run locally (no Cloudflare)
+  # -----------------------------
+  dev:local:
+    desc: Run local server and watch Leptos (no Cloudflare)
+    cmds:
+      - |
+        set -euo pipefail
+        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
+          rustup target add wasm32-unknown-unknown
+        fi
+        if ! command -v trunk >/dev/null 2>&1; then
+          cargo install trunk
+        fi
+        (
+          cd leptos-app && trunk watch --dist ../public/assets
+        ) &
+        pnpm run dev
+
+  # -----------------------------
+  # Option 3: Run with Cloudflare (Pages Functions)
+  # -----------------------------
+  dev:cf:
+    desc: Run with Cloudflare Pages dev (uses functions/). Applies local D1 schema.
+    deps: [db:local:init]
+    cmds:
+      - pnpm dlx wrangler pages dev
+
+  dev:cf:all:
+    desc: Run Cloudflare dev and Trunk watcher together (two-in-one)
+    deps: [db:local:init]
+    cmds:
+      - |
+        set -euo pipefail
+        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
+          rustup target add wasm32-unknown-unknown
+        fi
+        if ! command -v trunk >/dev/null 2>&1; then
+          cargo install trunk
+        fi
+        (
+          cd leptos-app && trunk watch --dist ../public/assets
+        ) &
+        pnpm dlx wrangler pages dev
+
+  # Helpers
+  cf:migrate:remote:
+    desc: Apply migrations to remote D1 (set up DB first in wrangler)
+    cmds:
+      - pnpm dlx wrangler d1 execute {{.DB_NAME}} --remote --file=./migrations/0001_init.sql
+      - pnpm dlx wrangler d1 execute {{.DB_NAME}} --remote --file=./migrations/0002_seed_dev.sql
+
+  clean:
+    desc: Remove local caches and build outputs
+    cmds:
+      - rm -rf node_modules public/assets .wrangler .pnpm-store
+      - rm -rf data

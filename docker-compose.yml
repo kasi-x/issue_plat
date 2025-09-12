@@ -1,0 +1,24 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8788:8788"
+    environment:
+      - PORT=8788
+      - ORIGIN_HOST=localhost:8788
+      - TURNSTILE_MODE=mock
+      - TURNSTILE_SECRET=disabled
+      - SALT_IP_HASH=dev-salt-change-me
+      - DB_PATH=/data/app.db
+    volumes:
+      - .:/app
+      - db-data:/data
+      - cargo-reg:/root/.cargo
+      - cargo-target:/app/leptos-app/target
+      - node-mod:/app/node_modules
+    command: ["/bin/bash","-lc","cd leptos-app && trunk watch --dist ../public/assets & pnpm run dev"]
+volumes:
+  db-data:
+  cargo-reg:
+  cargo-target:
+  node-mod:
