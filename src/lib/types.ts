@@ -28,6 +28,7 @@ export type CreateAnnotationBody = {
   body_html: string;
   selectors: AnnotationSelectorsEnvelope;
   quote: string;
+  kind?: 'comment' | 'question' | 'citation' | 'critique' | 'praise';
   turnstile_token: string;
   idempotency_key: string;
 };

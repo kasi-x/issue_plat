@@ -1,8 +1,9 @@
-import { error, json, sameOriginOnly, getIp, setCookie, getCookie } from '../../../src/lib/http.js';
-import sanitizeHtml from '../../../src/lib/sanitizer.js';
+import { json, sameOriginOnly, getIp, setCookie, getCookie } from '../../../src/lib/http.js';
+import { prepareAnnotationContent, applyRepeatHold } from '../../../src/lib/annotations/content.js';
+import { validateAnnotationBody } from '../../../src/lib/annotations/validation.js';
 import { hmacIpHash, isoDateUTC } from '../../../src/lib/crypto.js';
 import { verifyTurnstile } from '../../../src/lib/turnstile.js';
-import type { CreateAnnotationBody, Env } from '../../../src/lib/types.js';
+import type { Env } from '../../../src/lib/types.js';
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const headers = new Headers();
@@ -10,27 +11,21 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: 'bad_origin', message: 'forbidden' }, { status: 403, headers });
   }
 
-  let body: CreateAnnotationBody;
+  let rawBody: unknown;
   try {
-    body = await request.json<CreateAnnotationBody>();
+    rawBody = await request.json();
   } catch {
     return json({ error: 'invalid_input', message: 'invalid json' }, { status: 400, headers });
   }
 
-  if (!body.post_slug || !body.body_html || !body.selectors || !body.quote || !body.turnstile_token || !body.idempotency_key) {
-    return json({ error: 'invalid_input', message: 'missing fields' }, { status: 400, headers });
+  // Shared validator keeps Express and Cloudflare payload rules identical.
+  const validation = validateAnnotationBody(rawBody);
+  if (!validation.ok) {
+    const payload: Record<string, unknown> = { error: validation.error.error };
+    if (validation.error.message) payload.message = validation.error.message;
+    return json(payload, { status: validation.error.status, headers });
   }
-  if (body.display_name && body.display_name.length > 32) {
-    return json({ error: 'too_long', message: 'display name too long' }, { status: 400, headers });
-  }
-
-  // Validate selectors include both TextQuote and TextPosition
-  const sels = Array.isArray((body as any).selectors?.target?.selector)
-    ? (body as any).selectors.target.selector
-    : [];
-  const hasQuote = sels.some((s: any) => s?.type === 'TextQuoteSelector');
-  const hasPos = sels.some((s: any) => s?.type === 'TextPositionSelector');
-  if (!hasQuote || !hasPos) return json({ error: 'missing_selector' }, { status: 400, headers });
+  const body = validation.body;
 
   // Turnstile verify
   try {
@@ -50,13 +45,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     setCookie(headers, 'visitor_id', visitorId, { maxAge: 60 * 60 * 24 * 365 });
   }
 
-  const urlCount = (body.body_html.match(/https?:\/\//gi) || []).length;
-  const tooLong = body.body_html.length > 2000;
-  const sanitized = sanitizeHtml(body.body_html.slice(0, 8000));
-
-  // Moderation: default published; hold if long/URL-heavy
-  let state: 'published' | 'pending' = 'published';
-  if (tooLong || urlCount > 3) state = 'pending';
+  // Normalize HTML + moderation flags so both runtimes persist identical signals.
+  const prepared = prepareAnnotationContent(body.body_html, body.idempotency_key, body.kind);
+  let state = prepared.state;
 
   // Look up post
   const post = await env.DB.prepare('SELECT id FROM posts WHERE slug = ?').bind(body.post_slug).first<{ id: number }>();
@@ -100,25 +91,25 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const repeat = await env.DB.prepare(
     `SELECT COUNT(1) AS c FROM annotations WHERE quote = ? AND created_at > datetime('now', '-30 seconds')`
   ).bind(body.quote).first<{ c: number }>();
-  if ((repeat?.c || 0) > 0) state = 'pending';
-
-  const signals = JSON.stringify({ url_count: urlCount, too_long: tooLong, idempotency_key: body.idempotency_key });
+  // Keep spam heuristics aligned with the local server.
+  state = applyRepeatHold(state, repeat?.c || 0);
 
   try {
     const res = await env.DB.prepare(
-      `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`
+      `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals, kind)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
     )
       .bind(
         post.id,
         body.display_name ?? null,
-        sanitized,
+        prepared.sanitizedHtml,
         JSON.stringify(body.selectors),
         body.quote,
         state,
         visitorId,
         ipHash || null,
-        signals
+        JSON.stringify(prepared.signals),
+        prepared.kind
       )
       .run();
 

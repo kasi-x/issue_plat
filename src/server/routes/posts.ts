@@ -3,6 +3,8 @@ import type Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import { makeDbHelpers } from '../utils.js';
+import { renderHomePage } from '../views/home.js';
+import { renderPostPage } from '../views/post.js';
 
 export function createPostsRouter(db: Database) {
   const r = express.Router();
@@ -13,45 +15,35 @@ export function createPostsRouter(db: Database) {
   // Top page
   r.get('/', (_req, res) => {
     try {
-      const rows = select<{ slug: string; html: string; published_at: string | null }>(
-        `SELECT slug, html, published_at FROM posts ORDER BY COALESCE(published_at, '1970-01-01') DESC, id DESC LIMIT 200`
+      const rows = select<{ slug: string; html: string; plain_text: string | null; published_at: string | null; annoCount: number }>(
+        `SELECT p.slug, p.html, p.plain_text, p.published_at, COUNT(a.id) AS annoCount
+         FROM posts p
+         LEFT JOIN annotations a ON a.post_id = p.id AND a.state = 'published'
+         GROUP BY p.id
+         ORDER BY COALESCE(p.published_at, '1970-01-01') DESC, p.id DESC
+         LIMIT 200`
       );
       const items = rows.map(rw => {
         const m = rw.html.match(/<h1[^>]*>(.*?)<\/h1>/i);
         const title = (m?.[1] || rw.slug).replace(/<[^>]+>/g, '');
         const date = rw.published_at || '';
-        return { slug: rw.slug, title, date };
+        const text = (rw.plain_text || rw.html.replace(/<[^>]+>/g, ' '))
+          .replace(/\s+/g, ' ')
+          .trim();
+        const excerpt = text.slice(0, 220) + (text.length > 220 ? '…' : '');
+        const words = text ? text.split(/\s+/).length : 0;
+        const readingMinutes = Math.max(1, Math.round(words / 225));
+        return {
+          slug: rw.slug,
+          title,
+          date,
+          count: Number(rw.annoCount || 0),
+          excerpt,
+          readingMinutes,
+        };
       });
       res.setHeader('content-type', 'text/html; charset=utf-8');
-      res.send(`<!doctype html><html><head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Articles</title>
-        <link rel="stylesheet" href="/styles/style.css" />
-      </head>
-      <body>
-        <header class="site-header">
-          <div class="brand"><div class="logo" aria-hidden="true"></div><div class="title">Read + Anno</div></div>
-          <div class="search"><input placeholder="Search articles" /></div>
-          <div class="actions"></div>
-        </header>
-        <main class="layout">
-          <div></div>
-          <section class="post">
-            <h1>記事一覧</h1>
-            ${items.map(i => `
-              <article class="content-card" style="margin:16px 0">
-                <div class="content-body">
-                  <h2 style="margin:0 0 6px"><a href="/posts/${i.slug}" style="color:inherit;text-decoration:none">${i.title}</a></h2>
-                  <div style="font-size:13px;opacity:.8">${i.date || ''}</div>
-                </div>
-              </article>`).join('')}
-          </section>
-          <aside class="sidebar">
-            <div class="side-card"><div class="title">About</div><div style="font-size:14px;opacity:.85">Welcome. Select any text in articles to annotate.</div></div>
-          </aside>
-        </main>
-      </body></html>`);
+      res.send(renderHomePage(items));
     } catch (e) { return res.status(500).send('Internal Error'); }
   });
 
@@ -59,31 +51,42 @@ export function createPostsRouter(db: Database) {
   r.get('/posts/:slug', (req, res) => {
     const slug = req.params.slug;
     try {
-      const post = first<{ html: string }>('SELECT html FROM posts WHERE slug = ?', [slug]);
+      const post = first<{
+        html: string;
+        plain_text: string | null;
+        published_at: string | null;
+        anno_count: number;
+      }>(
+        `SELECT p.html, p.plain_text, p.published_at,
+          (
+            SELECT COUNT(1)
+            FROM annotations a
+            WHERE a.post_id = p.id AND a.state = 'published'
+          ) AS anno_count
+         FROM posts p
+         WHERE slug = ?`,
+        [slug]
+      );
       if (!post?.html) return res.status(404).send('Not Found');
+
+      const headingMatch = post.html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+      const title = headingMatch ? headingMatch[1].replace(/<[^>]+>/g, '').trim() : slug;
+      const bodyHtml = headingMatch ? post.html.replace(headingMatch[0], '') : post.html;
+      const plain = post.plain_text || bodyHtml.replace(/<[^>]+>/g, ' ');
+      const words = plain ? plain.trim().split(/\s+/).length : 0;
+      const readingMinutes = Math.max(1, Math.round(words / 225));
+
       res.setHeader('content-type', 'text/html; charset=utf-8');
-      res.send(`<!doctype html><html><head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>${slug}</title>
-        <link rel="stylesheet" href="/styles/style.css" />
-      </head>
-      <body>
-        <header class="site-header">
-          <div class="brand"><div class="logo" aria-hidden="true"></div><div class="title">Read + Anno</div></div>
-          <div class="search"><input placeholder="Search articles" /></div>
-          <div class="actions"></div>
-        </header>
-        <main class="layout">
-          <div class="left-rail"></div>
-          <article id="post" class="post content-card">
-            <h1>${slug}</h1>
-            <div class="content-body">${post.html}</div>
-          </article>
-          <aside class="sidebar"><div id="comments-root"></div></aside>
-        </main>
-        <script type="module" src="/assets/app.js"></script>
-      </body></html>`);
+      res.send(
+        renderPostPage({
+          slug,
+          title,
+          html: bodyHtml,
+          publishedAt: post.published_at || undefined,
+          annotationCount: Number(post.anno_count || 0),
+          readingMinutes,
+        })
+      );
     } catch { return res.status(500).send('Internal Error'); }
   });
 

@@ -37,37 +37,13 @@ tasks:
 
   wasm:build:
     desc: Build Leptos (WASM) bundle into public/assets
-    dir: leptos-app
     cmds:
-      - |
-        if command -v trunk >/dev/null 2>&1; then \
-          trunk build --dist ../public/assets; \
-          js=$(ls ../public/assets/*.js 2>/dev/null | head -n1); \
-          wasm=$(ls ../public/assets/*.wasm 2>/dev/null | head -n1); \
-          if [ -n "$js" ]; then cp "$js" ../public/assets/app.js; fi; \
-          if [ -n "$wasm" ]; then cp "$wasm" ../public/assets/app_bg.wasm; fi; \
-        else \
-          if command -v wasm-pack >/dev/null 2>&1; then \
-            wasm-pack build --target web --out-dir ../public/assets --out-name app; \
-          else \
-            pnpm dlx wasm-pack build --target web --out-dir ../public/assets --out-name app; \
-          fi; \
-        fi
+      - pnpm run build:wasm
 
   wasm:watch:
     desc: Watch Leptos with Trunk and emit to public/assets
-    dir: leptos-app
     cmds:
-      - |
-        set -euo pipefail
-        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
-          rustup target add wasm32-unknown-unknown
-        fi
-        if ! command -v trunk >/dev/null 2>&1; then
-          echo "trunk not found; installing via cargo install trunk" >&2
-          cargo install trunk
-        fi
-        exec trunk watch --dist ../public/assets
+      - pnpm run dev:wasm
 
   db:local:init:
     desc: Apply local D1 schema and seed (requires wrangler)
@@ -109,18 +85,7 @@ tasks:
   dev:local:
     desc: Run local server and watch Leptos (no Cloudflare)
     cmds:
-      - |
-        set -euo pipefail
-        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
-          rustup target add wasm32-unknown-unknown
-        fi
-        if ! command -v trunk >/dev/null 2>&1; then
-          cargo install trunk
-        fi
-        (
-          cd leptos-app && trunk watch --dist ../public/assets
-        ) &
-        pnpm run dev
+      - pnpm run dev
 
   # -----------------------------
   # Option 3: Run with Cloudflare (Pages Functions)
@@ -135,18 +100,7 @@ tasks:
     desc: Run Cloudflare dev and Trunk watcher together (two-in-one)
     deps: [db:local:init]
     cmds:
-      - |
-        set -euo pipefail
-        if ! rustup target list --installed | rg -q wasm32-unknown-unknown; then
-          rustup target add wasm32-unknown-unknown
-        fi
-        if ! command -v trunk >/dev/null 2>&1; then
-          cargo install trunk
-        fi
-        (
-          cd leptos-app && trunk watch --dist ../public/assets
-        ) &
-        pnpm dlx wrangler pages dev
+      - pnpm run dev:cloudflare
 
   # Helpers
   cf:migrate:remote:

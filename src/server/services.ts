@@ -1,13 +1,6 @@
 import type Database from 'better-sqlite3';
 import { hmacIpHash, isoDateUTC } from '../lib/crypto.js';
 
-export function moderationFlags(html: string) {
-  const urlCount = (html.match(/https?:\/\//gi) || []).length;
-  const tooLong = html.length > 2000;
-  const state: 'published' | 'pending' = (tooLong || urlCount > 3) ? 'pending' : 'published';
-  return { urlCount, tooLong, state };
-}
-
 export async function rateLimit(db: Database, salt: string, ip: string | undefined, visitorId: string) {
   const ipHash = ip ? await hmacIpHash(salt, ip, isoDateUTC()) : '';
   if (ipHash) {
@@ -33,4 +26,3 @@ export function reserveIdempotency(db: Database, visitorId: string, key: string)
   }
   return { conflict: false, idemKey } as const;
 }
-

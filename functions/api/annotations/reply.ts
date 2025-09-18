@@ -1,16 +1,28 @@
-import { error, json, sameOriginOnly, getIp, getCookie, setCookie } from '../../../src/lib/http.js';
-import sanitizeHtml from '../../../src/lib/sanitizer.js';
+import { json, sameOriginOnly, getIp, getCookie, setCookie } from '../../../src/lib/http.js';
+import { prepareAnnotationContent } from '../../../src/lib/annotations/content.js';
+import { validateAnnotationBody } from '../../../src/lib/annotations/validation.js';
 import { hmacIpHash, isoDateUTC } from '../../../src/lib/crypto.js';
 import { verifyTurnstile } from '../../../src/lib/turnstile.js';
-import type { Env, ReplyAnnotationBody } from '../../../src/lib/types.js';
+import type { Env } from '../../../src/lib/types.js';
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const headers = new Headers();
   if (!sameOriginOnly(request, env.ORIGIN_HOST)) return json({ error: 'bad_origin' }, { status: 403, headers });
-  let body: ReplyAnnotationBody;
-  try { body = await request.json<ReplyAnnotationBody>(); } catch { return json({ error: 'invalid_input' }, { status: 400, headers }); }
-  if (!body.parent_id || !body.post_slug || !body.turnstile_token || !body.idempotency_key) return json({ error: 'invalid_input' }, { status: 400, headers });
-  if (body.display_name && body.display_name.length > 32) return json({ error: 'too_long' }, { status: 400, headers });
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch {
+    return json({ error: 'invalid_input' }, { status: 400, headers });
+  }
+
+  // Use shared validator to mirror Express reply requirements.
+  const validation = validateAnnotationBody(rawBody, { isReply: true });
+  if (!validation.ok) {
+    const payload: Record<string, unknown> = { error: validation.error.error };
+    if (validation.error.message) payload.message = validation.error.message;
+    return json(payload, { status: validation.error.status, headers });
+  }
+  const body = validation.body;
 
   // Turnstile verify
   try {
@@ -25,10 +37,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   let visitorId = getCookie(request, 'visitor_id');
   if (!visitorId) { visitorId = crypto.randomUUID(); setCookie(headers, 'visitor_id', visitorId, { maxAge: 60 * 60 * 24 * 365 }); }
 
-  const urlCount = (body.body_html.match(/https?:\/\//gi) || []).length;
-  const tooLong = body.body_html.length > 2000;
-  let state: 'published' | 'pending' = (tooLong || urlCount > 3) ? 'pending' : 'published';
-  const sanitized = sanitizeHtml(body.body_html.slice(0, 8000));
+  // Shared sanitizer + moderation pipeline.
+  const prepared = prepareAnnotationContent(body.body_html, body.idempotency_key, body.kind);
+  let state = prepared.state;
 
   // Validate parent exists and get post_id
   const parent = await env.DB.prepare('SELECT id, post_id FROM annotations WHERE id = ?').bind(body.parent_id).first<{ id: number; post_id: number }>();
@@ -56,14 +67,26 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (existing?.value) return json({ error: 'conflict', id: Number(existing.value) || undefined }, { status: 409, headers });
   try { await env.DB.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').bind(idemKey, 'reserved').run(); } catch { return json({ error: 'conflict' }, { status: 409, headers }); }
 
-  const signals = JSON.stringify({ url_count: urlCount, too_long: tooLong, idempotency_key: body.idempotency_key });
+  const signals = JSON.stringify(prepared.signals);
 
   try {
     const res = await env.DB.prepare(
-      `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(parent.post_id, body.display_name ?? null, sanitized, JSON.stringify(body.selectors), body.quote, body.parent_id, state, visitorId, ipHash || null, signals)
+      .bind(
+        parent.post_id,
+        body.display_name ?? null,
+        prepared.sanitizedHtml,
+        JSON.stringify(body.selectors),
+        body.quote,
+        body.parent_id,
+        state,
+        visitorId,
+        ipHash || null,
+        signals,
+        prepared.kind
+      )
       .run();
     const id = res.meta.last_row_id;
     await env.DB.prepare('UPDATE settings SET value = ? WHERE key = ?').bind(String(id), idemKey).run();

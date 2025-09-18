@@ -1,11 +1,11 @@
 import express from 'express';
 import type Database from 'better-sqlite3';
-import { sanitizeHtml } from '../../lib/sanitizer.js';
-import type { CreateAnnotationBody, ReplyAnnotationBody, ReportAnnotationBody } from '../../lib/types.js';
+import type { ReportAnnotationBody } from '../../lib/types.js';
+import { prepareAnnotationContent, applyRepeatHold } from '../../lib/annotations/content.js';
+import { validateAnnotationBody } from '../../lib/annotations/validation.js';
 import { verifyTurnstileLocal } from '../turnstile.js';
 import { makeDbHelpers, sameOriginOnly, getIp, setCookie, getCookie } from '../utils.js';
-import { validateAnnotationBody } from '../validators.js';
-import { moderationFlags, rateLimit, reserveIdempotency } from '../services.js';
+import { rateLimit, reserveIdempotency } from '../services.js';
 
 export function createAnnotationsRouter(db: Database, opts: { originHost: string; salt: string }) {
   const r = express.Router();
@@ -27,21 +27,28 @@ export function createAnnotationsRouter(db: Database, opts: { originHost: string
 
   async function handleCreateOrReply(req: express.Request, res: express.Response, isReply: boolean) {
     if (!sameOriginOnly(req, opts.originHost)) return res.status(403).json({ error: 'bad_origin' });
-    const body = req.body as (CreateAnnotationBody & Partial<ReplyAnnotationBody>);
-    const vErr = validateAnnotationBody(body, isReply);
-    if (vErr) return res.status(vErr.status).json(vErr);
+
+    // Mirror Cloudflare payload rules via the shared validator.
+    const validation = validateAnnotationBody(req.body, { isReply });
+    if (!validation.ok) return res.status(validation.error.status).json(validation.error);
+    const body = validation.body;
 
     try {
       const v = await verifyTurnstileLocal(body.turnstile_token, getIp(req));
       if (!v.success) return res.status(403).json({ error: 'bot_suspected' });
-    } catch { return res.status(500).json({ error: 'internal_error', message: 'turnstile failed' }); }
+    } catch {
+      return res.status(500).json({ error: 'internal_error', message: 'turnstile failed' });
+    }
 
     let visitorId = getCookie(req, 'visitor_id');
-    if (!visitorId) { visitorId = crypto.randomUUID(); setCookie(res, 'visitor_id', visitorId, { maxAge: 60 * 60 * 24 * 365 }); }
+    if (!visitorId) {
+      visitorId = crypto.randomUUID();
+      setCookie(res, 'visitor_id', visitorId, { maxAge: 60 * 60 * 24 * 365 });
+    }
 
-    const { urlCount, tooLong, state: modState } = moderationFlags(body.body_html);
-    let state = modState;
-    const sanitized = sanitizeHtml(body.body_html.slice(0, 8000));
+    // Generate sanitized HTML + moderation signals once for reuse across runtimes.
+    const prepared = prepareAnnotationContent(body.body_html, body.idempotency_key, body.kind);
+    let state = prepared.state;
 
     const post = first<{ id: number }>('SELECT id FROM posts WHERE slug = ?', [body.post_slug]);
     if (!post?.id) return res.status(404).json({ error: 'not_found' });
@@ -55,23 +62,43 @@ export function createAnnotationsRouter(db: Database, opts: { originHost: string
     let parentId: number | null = null;
     if (isReply) {
       const parent = first<{ id: number; post_id: number }>('SELECT id, post_id FROM annotations WHERE id = ?', [body.parent_id]);
-      if (!parent?.id || parent.post_id !== post.id) return res.status(400).json({ error: 'invalid_input', message: 'parent mismatch' });
+      if (!parent?.id || parent.post_id !== post.id) {
+        return res.status(400).json({ error: 'invalid_input', message: 'parent mismatch' });
+      }
       parentId = parent.id;
     }
 
-    const repeat = first<{ c: number }>(`SELECT COUNT(1) AS c FROM annotations WHERE quote = ? AND created_at > datetime('now', '-30 seconds')`, [body.quote]);
-    if ((repeat?.c || 0) > 0) state = 'pending';
+    const repeat = first<{ c: number }>(
+      `SELECT COUNT(1) AS c FROM annotations WHERE quote = ? AND created_at > datetime('now', '-30 seconds')`,
+      [body.quote]
+    );
+    state = applyRepeatHold(state, repeat?.c || 0);
 
-    const signals = JSON.stringify({ url_count: urlCount, too_long: tooLong, idempotency_key: body.idempotency_key });
     try {
-      const info = db.prepare(
-        `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(post.id, body.display_name ?? null, sanitized, JSON.stringify(body.selectors), body.quote, parentId, state, visitorId, (rl as any).ipHash || null, signals);
+      const info = db
+        .prepare(
+          `INSERT INTO annotations (post_id, display_name, body_html, selectors, quote, parent_id, state, visitor_id, ip_hash, signals, kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          post.id,
+          body.display_name ?? null,
+          prepared.sanitizedHtml,
+          JSON.stringify(body.selectors),
+          body.quote,
+          parentId,
+          state,
+          visitorId,
+          (rl as any).ipHash || null,
+          JSON.stringify(prepared.signals),
+          prepared.kind
+        );
       const id = Number(info.lastInsertRowid);
       db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(String(id), (idem as any).idemKey);
       return res.json({ id, state });
-    } catch (e: any) { return res.status(500).json({ error: 'internal_error', message: e.message }); }
+    } catch (e: any) {
+      return res.status(500).json({ error: 'internal_error', message: e.message });
+    }
   }
 
   r.post('/create', (req, res) => { void handleCreateOrReply(req, res, false); });
@@ -89,4 +116,3 @@ export function createAnnotationsRouter(db: Database, opts: { originHost: string
 
   return r;
 }
-

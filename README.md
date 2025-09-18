@@ -17,9 +17,16 @@ Local (no Cloudflare) quick start:
 2. Copy `.env.example` to `.env` (optional) and adjust if needed.
    - Defaults: `PORT=8788`, `TURNSTILE_MODE=mock`, `ORIGIN_HOST=localhost:8788`, `DB_PATH=./data/app.db`.
 3. Start locally:
-   - `pnpm run dev`
+   - `pnpm run dev` (alias for `pnpm run dev:local`)
    - Server: http://localhost:8788
    - Post page: http://localhost:8788/posts/hello-world
+
+Runtime targets
+
+- `pnpm run dev:local` / `pnpm run dev` — native or Docker host with SQLite (`data/app.db` by default).
+- `pnpm run dev:docker` — same as local but marks the runtime so SQLite lives under `data/docker/` unless `DB_PATH` is set.
+- `pnpm run dev:cloudflare` — runs the WASM watcher alongside `wrangler pages dev`; schema changes should be managed with `wrangler d1` migrations.
+- All runtime-aware scripts accept `--target <local|docker|cloudflare>` and also honour `RUNTIME_TARGET`, `RUNTIME`, or `DEPLOY_TARGET` environment variables.
 
 Using Docker (recommended for local debug):
 
@@ -29,10 +36,10 @@ Using Docker (recommended for local debug):
 
 Leptos frontend (CSR) build
 
-- Requires Rust + wasm-pack installed locally.
-- Build the WASM bundle to `public/assets`:
-  - `cd leptos-app`
-  - `wasm-pack build --target web --out-dir ../public/assets --out-name app`
+- Requires Rust (with `wasm32-unknown-unknown` target). If `trunk` is not installed the scripts will fall back to `wasm-pack` (using `pnpm dlx wasm-pack` when necessary).
+- `pnpm run dev` now runs both the Express server *and* a Leptos watcher. Whenever files in `leptos-app/src` change the WASM bundle in `public/assets` is rebuilt automatically.
+- To build the bundle once (for CI or testing), run `pnpm run build:wasm` — it uses `trunk build` when available and otherwise falls back to `wasm-pack build`. Pass `--target cloudflare` if you need to align with the Cloudflare runtime configuration.
+- A fresh WASM bundle is produced automatically before `pnpm run test`, so local unit tests always see the latest assets.
 - Reload http://localhost:8788/posts/hello-world and use the “Add annotation” button after selecting text.
 
 Scripts:

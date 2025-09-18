@@ -19,11 +19,17 @@
     "@types/express": "^4.17.21"
   },
   "scripts": {
-    "dev": "pnpm dlx tsx watch src/server/index.ts",
-    "dev:local": "task dev:local",
+    "dev": "node ./scripts/dev-all.mjs --target local",
+    "dev:local": "node ./scripts/dev-all.mjs --target local",
+    "dev:docker": "node ./scripts/dev-all.mjs --target docker",
+    "dev:cloudflare": "node ./scripts/dev-all.mjs --target cloudflare",
+    "dev:server": "pnpm dlx tsx watch src/server/index.ts",
+    "dev:wasm": "node ./scripts/dev-wasm.mjs",
     "dev:container": "task dev:container",
     "dev:cf": "task dev:cf",
     "build": "echo 'Rust/Leptos build handled separately; this repo contains CF functions + utilities.'",
+    "build:wasm": "node ./scripts/build-wasm.mjs",
+    "pretest": "pnpm run build:wasm",
     "test": "vitest run"
   }
 }
